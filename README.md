@@ -22,6 +22,7 @@
 | **跑鞋装备与里程恢复** | 不支持，换区后跑鞋里程归零 | 自动在目标端重建活跃/退役装备，并**根据源活动与目标活动 ID 映射表自动重新绑定每一条运动**，完整恢复跑鞋累计里程 |
 | **自定义训练课表** | 不支持 | 自动剥离区域专属主键，跨区重建间歇跑、力量训练等自定义训练计划 (`Workouts`) |
 | **官方离线导出包导入** | 不支持 | 支持直接读取佳明官网导出的全量备份包（`DI_CONNECT` 目录或多层嵌套 `.zip`），免源端拉取直接批量上传 |
+| **Intervals.icu 全量直连同步** | 不支持（佳明官方不向第三方推送外部导入的历史数据） | 内置 `migrate-intervals` 模块，**直接将佳明国区/国际区的历史 `.fit` 运动与每日健康指标（HRV、静息心率、睡眠分数/时长、体重体脂、血氧、呼吸、血压、$\text{VO}_2\text{max}$）批量推入 Intervals.icu** |
 | **断点续传机制** | 中断后需重头扫描比对 | 内置 **SQLite 本地状态账本 (`migration_ledger.db`)**，精确记录每一条活动、每一天健康包、每一次称重，随时按 `Ctrl+C` 中断并秒级续传 |
 
 ---
@@ -177,6 +178,27 @@ python3 migrate.py migrate-all
 ```bash
 python3 migrate.py import-offline /path/to/Garmin_Export.zip
 ```
+
+#### 方案 D：同步历史运动与全量健康数据至 Intervals.icu (`migrate-intervals`)
+由于佳明官方对第三方平台（Strava / Intervals.icu）仅推送手表**新产生**的运动，不会主动推送外部手动导入的历史数据，且佳明国际区不开放历史 HRV 与睡眠分数重算写入，你可以使用 `migrate-intervals` 直接将佳明国区（或国际区）的数据无损推入 [Intervals.icu](https://intervals.icu/)：
+
+1. 登录 [Intervals.icu Settings](https://intervals.icu/settings)，滑到底部 **Developer Settings**，复制你的 **Athlete ID**（或保持默认 `0` 自动识别）并点击生成 **API Key**。
+2. 在 `.env` 中填入：
+   ```ini
+   INTERVALS_ATHLETE_ID=0
+   INTERVALS_API_KEY=你的_Intervals_API_Key
+   ```
+3. 执行同步命令：
+   ```bash
+   # 一键将佳明国区的历史运动 (.fit) + 每日健康数据 (HRV/静息心率/睡眠分数/体重体脂/血氧/血压) 同步至 Intervals.icu
+   python3 migrate.py migrate-intervals
+
+   # 仅同步最近 30 天的健康数据（HRV、睡眠分数、静息心率、体重等）
+   python3 migrate.py migrate-intervals --wellness-only --days 30
+
+   # 使用快速区间批量模式同步全年健康数据（秒级完成全年 RHR/HRV/睡眠分数/步数/体重/血压聚合写入）
+   python3 migrate.py migrate-intervals --wellness-only --start-date 2025-01-01 --fast-wellness
+   ```
 
 ### 查看本地断点账本统计 (`status`)
 

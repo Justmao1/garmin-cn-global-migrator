@@ -23,10 +23,15 @@ class MigrationLedger:
     """Persistent SQLite state store for断点续传 (checkpoint & resume) and ID mapping."""
 
     def __init__(self, db_path: Path | str) -> None:
-        self.db_path = Path(db_path).expanduser()
+        self.db_path = Path(db_path).expanduser().resolve()
+        self._connect()
+
+    def _connect(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path))
+        self.conn = sqlite3.connect(str(self.db_path), timeout=15.0)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL;")
+        self.conn.execute("PRAGMA busy_timeout=15000;")
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -123,6 +128,29 @@ class MigrationLedger:
                     target_activity_id INTEGER,
                     error_msg TEXT,
                     updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS intervals_activities (
+                    source_region TEXT NOT NULL,
+                    source_id INTEGER NOT NULL,
+                    intervals_id TEXT,
+                    activity_name TEXT,
+                    start_time_local TEXT,
+                    file_format TEXT,
+                    status TEXT NOT NULL,          -- 'uploaded', 'duplicate', 'unavailable', 'failed'
+                    error_msg TEXT,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (source_region, source_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS intervals_wellness (
+                    source_region TEXT NOT NULL,
+                    calendar_date TEXT NOT NULL,   -- YYYY-MM-DD
+                    metrics_count INTEGER DEFAULT 0,
+                    status TEXT NOT NULL,          -- 'uploaded', 'empty', 'failed'
+                    error_msg TEXT,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (source_region, calendar_date)
                 );
                 """
             )
@@ -502,6 +530,102 @@ class MigrationLedger:
             )
 
     # ------------------------------------------------------------------ #
+    #  Intervals.icu Sync                                                #
+    # ------------------------------------------------------------------ #
+
+    def is_intervals_activity_done(self, source_region: str, source_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT status, updated_at FROM intervals_activities WHERE source_region = ? AND source_id = ?",
+            (source_region, int(source_id)),
+        ).fetchone()
+        if not row:
+            return False
+        if row["status"] in ("uploaded", "duplicate"):
+            return True
+        if row["status"] == "unavailable" and (time.time() - row["updated_at"]) < 7 * 86400:
+            return True
+        return False
+
+    def record_intervals_activity(
+        self,
+        source_region: str,
+        source_id: int,
+        *,
+        intervals_id: str | None = None,
+        activity_name: str = "",
+        start_time_local: str = "",
+        file_format: str = "fit",
+        status: str = "uploaded",
+        error_msg: str = "",
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO intervals_activities (
+                    source_region, source_id, intervals_id, activity_name,
+                    start_time_local, file_format, status, error_msg, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_region, source_id) DO UPDATE SET
+                    intervals_id = COALESCE(excluded.intervals_id, intervals_activities.intervals_id),
+                    activity_name = excluded.activity_name,
+                    start_time_local = excluded.start_time_local,
+                    file_format = excluded.file_format,
+                    status = excluded.status,
+                    error_msg = excluded.error_msg,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    source_region,
+                    int(source_id),
+                    str(intervals_id) if intervals_id else None,
+                    activity_name,
+                    start_time_local,
+                    file_format,
+                    status,
+                    error_msg,
+                    int(time.time()),
+                ),
+            )
+
+    def is_intervals_wellness_done(self, source_region: str, calendar_date: str) -> bool:
+        row = self.conn.execute(
+            "SELECT status FROM intervals_wellness WHERE source_region = ? AND calendar_date = ?",
+            (source_region, calendar_date),
+        ).fetchone()
+        return bool(row and row["status"] in ("uploaded", "empty"))
+
+    def record_intervals_wellness(
+        self,
+        source_region: str,
+        calendar_date: str,
+        *,
+        metrics_count: int = 0,
+        status: str = "uploaded",
+        error_msg: str = "",
+    ) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO intervals_wellness (
+                    source_region, calendar_date, metrics_count, status, error_msg, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_region, calendar_date) DO UPDATE SET
+                    metrics_count = excluded.metrics_count,
+                    status = excluded.status,
+                    error_msg = excluded.error_msg,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    source_region,
+                    calendar_date,
+                    int(metrics_count),
+                    status,
+                    error_msg,
+                    int(time.time()),
+                ),
+            )
+
+    # ------------------------------------------------------------------ #
     #  Summary Statistics                                                #
     # ------------------------------------------------------------------ #
 
@@ -527,4 +651,11 @@ class MigrationLedger:
             "SELECT status, COUNT(*) as cnt FROM offline_files GROUP BY status"
         ).fetchall()
         summary["offline_files"] = {str(r["status"]): int(r["cnt"]) for r in offline_rows}
+
+        for iv_table in ("intervals_activities", "intervals_wellness"):
+            iv_rows = self.conn.execute(
+                f"SELECT status, COUNT(*) as cnt FROM {iv_table} GROUP BY status"  # noqa: S608
+            ).fetchall()
+            summary[iv_table] = {str(r["status"]): int(r["cnt"]) for r in iv_rows}
+
         return summary

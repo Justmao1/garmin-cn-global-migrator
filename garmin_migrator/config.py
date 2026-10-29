@@ -53,6 +53,9 @@ class MigratorConfig:
     upload_delay_seconds: float = 1.5
     wellness_day_delay_seconds: float = 1.0
     sync_activity_metadata: bool = True
+    intervals_athlete_id: str = "0"
+    intervals_api_key: str = ""
+    intervals_source_region: str = "cn"
     data_dir: Path = Path("./data")
     token_dir: Path = Path("./data/tokens")
     ledger_db_path: Path = Path("./data/migration_ledger.db")
@@ -71,6 +74,12 @@ class MigratorConfig:
         if direction not in ("cn_to_global", "global_to_cn"):
             direction = "cn_to_global"
 
+        intervals_source = (
+            os.getenv("INTERVALS_SOURCE_REGION", "cn").strip().lower()
+        )
+        if intervals_source not in ("cn", "global"):
+            intervals_source = "cn"
+
         return cls(
             cn_username=os.getenv(
                 "GARMIN_CN_USERNAME", os.getenv("GARMIN_USERNAME", "")
@@ -84,6 +93,9 @@ class MigratorConfig:
             upload_delay_seconds=_env_float("UPLOAD_DELAY_SECONDS", 1.5),
             wellness_day_delay_seconds=_env_float("WELLNESS_DAY_DELAY_SECONDS", 1.0),
             sync_activity_metadata=_env_bool("SYNC_ACTIVITY_METADATA", True),
+            intervals_athlete_id=os.getenv("INTERVALS_ATHLETE_ID", "0").strip() or "0",
+            intervals_api_key=os.getenv("INTERVALS_API_KEY", "").strip(),
+            intervals_source_region=intervals_source,
             data_dir=data_dir,
             token_dir=token_dir,
             ledger_db_path=ledger_db_path,

@@ -14,6 +14,7 @@ from garmin_migrator.ledger import MigrationLedger
 from garmin_migrator.migrators.activities import ActivityMigrator
 from garmin_migrator.migrators.body_health import BodyHealthMigrator
 from garmin_migrator.migrators.gear_workouts import GearAndWorkoutsMigrator
+from garmin_migrator.migrators.intervals_icu import IntervalsIcuMigrator
 from garmin_migrator.migrators.offline_export import OfflineExportImporter
 from garmin_migrator.migrators.wellness import WellnessMigrator
 
@@ -99,6 +100,8 @@ def cmd_status(args: argparse.Namespace, config: MigratorConfig) -> int:
             "gear": "👟 运动装备 (Gear)",
             "workouts": "📋 自定义训练 (Workouts)",
             "offline_files": "📦 离线导入文件 (Offline Export)",
+            "intervals_activities": "📈 Intervals.icu 运动 (Activities)",
+            "intervals_wellness": "💤 Intervals.icu 健康 (Wellness)",
         }
         for key, title in labels.items():
             counts = summary.get(key) or {}
@@ -282,6 +285,66 @@ def cmd_import_offline(args: argparse.Namespace, config: MigratorConfig) -> int:
     return 0
 
 
+def cmd_migrate_intervals(args: argparse.Namespace, config: MigratorConfig) -> int:
+    """Sync Garmin activities (.fit/.tcx/.gpx) and daily wellness metrics (RHR/HRV/Sleep/Weight/SpO2/BP) to Intervals.icu."""
+    source_region = (args.source or config.intervals_source_region or "cn").lower()
+    auth = DualRegionAuth(config)
+    ledger = MigrationLedger(config.ledger_db_path)
+    try:
+        garmin_client = auth.login_region(is_cn=(source_region == "cn"))
+        migrator = IntervalsIcuMigrator(
+            garmin_client,
+            ledger,
+            config,
+            source_region=source_region,
+            athlete_id=args.athlete_id,
+            api_key=args.api_key,
+        )
+        profile = migrator.verify_connection()
+        print(
+            f"\n🔗 已连接 Intervals.icu 账号: {profile.get('name') or profile.get('email') or ''} "
+            f"(Athlete ID: {migrator.athlete_id}) | 数据源: 佳明 {source_region.upper()}\n"
+        )
+
+        # Determine date bounds
+        if args.days and args.days > 0:
+            end_d = date.today()
+            start_d = end_d - timedelta(days=args.days - 1)
+            start_date_str = start_d.isoformat()
+            end_date_str = end_d.isoformat()
+        else:
+            start_date_str = args.start_date
+            end_date_str = args.end_date
+
+        # 1. Sync Activities
+        if not args.wellness_only:
+            print("================ [1/2] 同步运动轨迹 (.fit/.tcx/.gpx) 与活动名称/备注至 Intervals.icu ================")
+            migrator.sync_activities(
+                max_count=args.limit,
+                start_date=start_date_str,
+                end_date=end_date_str,
+                oldest_first=not args.newest_first,
+                force=args.force,
+                dry_run=args.dry_run,
+            )
+
+        # 2. Sync Daily Wellness (RHR, HRV, Sleep Score/Secs, Weight, BodyFat, Steps, SpO2, Respiration, BP, VO2Max)
+        if not args.activities_only:
+            print("\n================ [2/2] 批量同步每日健康指标 (HRV/静息心率/睡眠分数/体重体脂/血氧/血压) 至 Intervals.icu ================")
+            w_start = start_date_str or _auto_detect_earliest_activity_date(garmin_client)
+            w_end = end_date_str or date.today().isoformat()
+            migrator.sync_wellness(
+                start_date=w_start,
+                end_date=w_end,
+                fast_mode=args.fast_wellness,
+                force=args.force,
+                dry_run=args.dry_run,
+            )
+    finally:
+        ledger.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="migrate.py",
@@ -371,6 +434,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_off.add_argument("--limit", type=int, default=None, help="限制本次最多导入的文件数量")
     p_off.add_argument("--dry-run", action="store_true", help="仅扫描统计不实际上传")
     p_off.set_defaults(func=cmd_import_offline)
+
+    # 10. migrate-intervals
+    p_iv = sub.add_parser(
+        "migrate-intervals",
+        help="将佳明国区/国际区的历史运动记录 (.fit) 与全套健康数据 (HRV/静息心率/睡眠分数/体重体脂/血氧/血压) 同步导入 Intervals.icu",
+    )
+    p_iv.add_argument(
+        "--source",
+        choices=["cn", "global"],
+        default=None,
+        help="指定从佳明哪个区拉取数据同步至 Intervals.icu (默认 cn，直接从中国区拉取)",
+    )
+    p_iv.add_argument("--athlete-id", default=None, help="覆盖 .env 中的 INTERVALS_ATHLETE_ID (默认 0 自动识别当前账号)")
+    p_iv.add_argument("--api-key", default=None, help="覆盖 .env 中的 INTERVALS_API_KEY")
+    p_iv.add_argument("--start-date", help="起始日期 YYYY-MM-DD (不填则自动探测最早运动日期)")
+    p_iv.add_argument("--end-date", help="结束日期 YYYY-MM-DD (默认今天)")
+    p_iv.add_argument("--days", type=int, default=None, help="或者快捷指定同步最近 N 天的数据")
+    p_iv.add_argument("--limit", type=int, default=None, help="最多同步多少条运动记录 (默认全量)")
+    p_iv.add_argument("--newest-first", action="store_true", help="运动记录从最新向最旧同步 (默认从最旧向最新)")
+    p_iv.add_argument("--activities-only", action="store_true", help="仅同步运动记录 (.fit/.tcx/.gpx)")
+    p_iv.add_argument("--wellness-only", action="store_true", help="仅同步每日健康指标 (HRV/静息心率/睡眠/体重体脂/血氧/血压)")
+    p_iv.add_argument(
+        "--fast-wellness",
+        action="store_true",
+        help="健康数据使用快速区间批量接口 (秒级拉取全年 RHR/HRV/睡眠分数/步数/体重/血压，跳过逐日睡眠详情请求)",
+    )
+    p_iv.add_argument("--force", action="store_true", help="忽略本地 SQLite 账本记录，强制重新同步覆盖")
+    p_iv.add_argument("--dry-run", action="store_true", help="仅预览将要同步至 Intervals.icu 的数据，不实际发送请求")
+    p_iv.set_defaults(func=cmd_migrate_intervals)
 
     return parser
 

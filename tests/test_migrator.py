@@ -14,6 +14,7 @@ from garmin_migrator.ledger import MigrationLedger
 from garmin_migrator.migrators.activities import ActivityMigrator, _activity_dedup_key
 from garmin_migrator.migrators.body_health import BodyHealthMigrator
 from garmin_migrator.migrators.gear_workouts import GearAndWorkoutsMigrator
+from garmin_migrator.migrators.intervals_icu import IntervalsIcuMigrator
 from garmin_migrator.migrators.offline_export import (
     OfflineExportImporter,
     iter_fit_files_from_path,
@@ -245,6 +246,83 @@ class TestGarminMigratorSuite(unittest.TestCase):
     def test_date_range_generator(self) -> None:
         dates = generate_date_range("2026-10-01", "2026-10-03", oldest_first=True)
         self.assertEqual(dates, ["2026-10-01", "2026-10-02", "2026-10-03"])
+
+    def test_intervals_icu_wellness_and_activity_sync(self) -> None:
+        src = MagicMock()
+        src.ActivityDownloadFormat = MagicMock()
+        src.ActivityDownloadFormat.ORIGINAL = "ORIGINAL"
+
+        # Mock Garmin range & daily wellness endpoints
+        src.get_rhr_daily.return_value = [{"calendarDate": "2026-10-20", "value": 49}]
+        src.get_hrv_data_range.return_value = {
+            "hrvSummaries": [{"calendarDate": "2026-10-20", "lastNightAvg": 68.0}]
+        }
+        src.get_daily_steps.return_value = [{"calendarDate": "2026-10-20", "totalSteps": 12345}]
+        src.get_sleep_daily.return_value = [{"calendarDate": "2026-10-20", "overallSleepScore": 86}]
+        src.get_body_composition.return_value = {
+            "dateWeightList": [{"calendarDate": "2026-10-20", "weight": 67500.0, "bodyFat": 13.8}]
+        }
+        src.get_blood_pressure.return_value = {
+            "measurementSummaries": [
+                {
+                    "measurements": [
+                        {
+                            "measurementTimestampLocal": "2026-10-20T08:00:00",
+                            "systolic": 115,
+                            "diastolic": 75,
+                        }
+                    ]
+                }
+            ]
+        }
+        src.get_max_metrics_range.return_value = [
+            {"generic": {"calendarDate": "2026-10-20", "vo2MaxPreciseValue": 56.4}}
+        ]
+        src.get_sleep_data.return_value = {
+            "dailySleepDTO": {
+                "sleepTimeSeconds": 28200,
+                "avgSpO2": 97.0,
+                "averageRespirationValue": 14.2,
+                "sleepScores": {"overall": {"value": 88, "qualifierKey": "EXCELLENT"}},
+            }
+        }
+
+        self.config.intervals_api_key = "test_api_key"
+        self.config.intervals_athlete_id = "i99999"
+        migrator = IntervalsIcuMigrator(src, self.ledger, self.config)
+
+        mock_http_resp = MagicMock()
+        mock_http_resp.status_code = 200
+        mock_http_resp.text = '{"status": "ok"}'
+        mock_http_resp.json.return_value = {"status": "ok"}
+        migrator._request = MagicMock(return_value=mock_http_resp)
+
+        w_stats = migrator.sync_wellness("2026-10-20", "2026-10-20")
+        self.assertEqual(w_stats["uploaded_days"], 1)
+        self.assertTrue(self.ledger.is_intervals_wellness_done("cn", "2026-10-20"))
+
+        # Verify payload passed to PUT /athlete/i99999/wellness-bulk
+        migrator._request.assert_called_once()
+        call_args, call_kwargs = migrator._request.call_args
+        self.assertEqual(call_args[0], "PUT")
+        self.assertEqual(call_args[1], "/athlete/i99999/wellness-bulk")
+        bulk_payload = call_kwargs["json_data"]
+        self.assertEqual(len(bulk_payload), 1)
+        day_rec = bulk_payload[0]
+        self.assertEqual(day_rec["id"], "2026-10-20")
+        self.assertEqual(day_rec["restingHR"], 49)
+        self.assertEqual(day_rec["hrv"], 68.0)
+        self.assertEqual(day_rec["steps"], 12345)
+        self.assertEqual(day_rec["sleepSecs"], 28200)
+        self.assertEqual(day_rec["sleepScore"], 88)
+        self.assertEqual(day_rec["sleepQuality"], 1)
+        self.assertEqual(day_rec["weight"], 67.5)
+        self.assertEqual(day_rec["bodyFat"], 13.8)
+        self.assertEqual(day_rec["spO2"], 97.0)
+        self.assertEqual(day_rec["respiration"], 14.2)
+        self.assertEqual(day_rec["systolic"], 115)
+        self.assertEqual(day_rec["diastolic"], 75)
+        self.assertEqual(day_rec["vo2max"], 56.4)
 
 
 if __name__ == "__main__":
