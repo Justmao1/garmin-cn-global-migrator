@@ -1,0 +1,46 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment variables & secrets (NEVER COMMIT)
+.env
+.env.local
+*.pem
+*.key
+
+# Runtime data, tokens & SQLite checkpoint ledger
+data/
+*.db
+*.db-journal
+*.db-wal
+garmin_tokens.json
+oauth1_token.json
+oauth2_token.json
+
+# Downloaded / exported workout & wellness archives
+*.fit
+*.tcx
+*.gpx
+*.zip
+garmin_fit_files/
+garmin_wellness_files/
+DI_CONNECT/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
